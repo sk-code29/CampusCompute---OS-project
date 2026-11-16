@@ -1,6 +1,13 @@
-#ifndef WORKER_H
-#define WORKER_H
+#include <stdio.h>
+#include "worker.h"
 
-void run_worker_demo(void);
+int main(void)
+{
+    printf("========== WORKER MODULE TEST ==========\n");
 
-#endif
+    run_worker_demo();
+
+    printf("\n========== TEST COMPLETED ==========\n");
+
+    return 0;
+}
