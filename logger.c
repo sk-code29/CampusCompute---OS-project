@@ -1,55 +1,86 @@
-
 #include <stdio.h>
-#include <stdlib.h>
 #include <pthread.h>
 #include "logger.h"
 
 #define BUFFER_SIZE 5
 #define TOTAL_ITEMS 10
 
-/* Shared bounded buffer */
-int buffer[BUFFER_SIZE];
+/* Shared circular buffer */
+static int buffer[BUFFER_SIZE];
+static int front = 0;
+static int rear = 0;
+static int count = 0;
+static int stop = 0;
 
-int front = 0;
-int rear = 0;
-int count = 0;
+/* Synchronization */
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t not_full = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t not_empty = PTHREAD_COND_INITIALIZER;
 
-/* Synchronization variables */
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+static FILE *log_file;
 
-pthread_cond_t not_full = PTHREAD_COND_INITIALIZER;
-pthread_cond_t not_empty = PTHREAD_COND_INITIALIZER;
+/* Print a message to the terminal and log file */
+static void log_event(const char *message)
+{
+    printf("%s\n", message);
+    fprintf(log_file, "%s\n", message);
+    fflush(log_file);
+}
 
-FILE *log_file;
+/* Display the current buffer contents in FIFO order */
+static void show_buffer(void)
+{
+    printf("Buffer: [");
+    fprintf(log_file, "Buffer: [");
+
+    for (int i = 0; i < count; i++) {
+        int index = (front + i) % BUFFER_SIZE;
+
+        printf("%d", buffer[index]);
+        fprintf(log_file, "%d", buffer[index]);
+
+        if (i < count - 1) {
+            printf(", ");
+            fprintf(log_file, ", ");
+        }
+    }
+
+    printf("] (%d/%d occupied)\n", count, BUFFER_SIZE);
+    fprintf(log_file, "] (%d/%d occupied)\n", count, BUFFER_SIZE);
+
+    fflush(log_file);
+}
 
 /* Producer thread */
-void *producer(void *arg)
+static void *producer(void *arg)
 {
     (void)arg;
 
     for (int item = 1; item <= TOTAL_ITEMS; item++) {
-
         pthread_mutex_lock(&mutex);
 
-        /* Wait if buffer is full */
-        while (count == BUFFER_SIZE) {
-            printf("Producer waiting: Buffer is full.\n");
+        while (count == BUFFER_SIZE && !stop) {
+            log_event("Producer waiting: buffer FULL. Waiting for consumer...");
             pthread_cond_wait(&not_full, &mutex);
         }
 
-        buffer[rear] = item;
+        if (stop) {
+            pthread_mutex_unlock(&mutex);
+            return NULL;
+        }
 
+        buffer[rear] = item;
         rear = (rear + 1) % BUFFER_SIZE;
         count++;
 
-        printf("Producer produced item: %d\n", item);
+        char message[100];
+        snprintf(message, sizeof(message),
+                 "Producer produced item: %d", item);
+        log_event(message);
 
-        fprintf(log_file, "Produced item: %d\n", item);
-        fflush(log_file);
+        show_buffer();
 
-        /* Notify consumer */
         pthread_cond_signal(&not_empty);
-
         pthread_mutex_unlock(&mutex);
     }
 
@@ -57,40 +88,42 @@ void *producer(void *arg)
 }
 
 /* Consumer thread */
-void *consumer(void *arg)
+static void *consumer(void *arg)
 {
     (void)arg;
 
-    for (int i = 1; i <= TOTAL_ITEMS; i++) {
-
+    for (int i = 0; i < TOTAL_ITEMS; i++) {
         pthread_mutex_lock(&mutex);
 
-        /* Wait if buffer is empty */
-        while (count == 0) {
-            printf("Consumer waiting: Buffer is empty.\n");
+        while (count == 0 && !stop) {
+            log_event("Consumer waiting: buffer EMPTY. Waiting for producer...");
             pthread_cond_wait(&not_empty, &mutex);
         }
 
-        int item = buffer[front];
+        if (stop && count == 0) {
+            pthread_mutex_unlock(&mutex);
+            return NULL;
+        }
 
+        int item = buffer[front];
         front = (front + 1) % BUFFER_SIZE;
         count--;
 
-        printf("Consumer consumed item: %d\n", item);
+        char message[100];
+        snprintf(message, sizeof(message),
+                 "Consumer consumed item: %d", item);
+        log_event(message);
 
-        fprintf(log_file, "Consumed item: %d\n", item);
-        fflush(log_file);
+        show_buffer();
 
-        /* Notify producer */
         pthread_cond_signal(&not_full);
-
         pthread_mutex_unlock(&mutex);
     }
 
     return NULL;
 }
 
-/* Start producer-consumer demonstration */
+/* Run producer-consumer demonstration */
 void run_logger_demo(void)
 {
     pthread_t producer_thread;
@@ -103,39 +136,49 @@ void run_logger_demo(void)
         return;
     }
 
+    pthread_mutex_lock(&mutex);
+
     front = 0;
     rear = 0;
     count = 0;
+    stop = 0;
+
+    pthread_mutex_unlock(&mutex);
 
     printf("\n========== PRODUCER-CONSUMER ==========\n");
+    log_event("Initial buffer state:");
+    show_buffer();
 
-    /* Create threads */
-    if (pthread_create(&producer_thread, NULL, producer, NULL) != 0) {
-        printf("Error creating producer thread.\n");
+    /* Start consumer first */
+    if (pthread_create(&consumer_thread, NULL, consumer, NULL) != 0) {
+        log_event("Error creating consumer thread.");
         fclose(log_file);
         return;
     }
 
-    if (pthread_create(&consumer_thread, NULL, consumer, NULL) != 0) {
-        printf("Error creating consumer thread.\n");
-
+    /* Start producer */
+    if (pthread_create(&producer_thread, NULL, producer, NULL) != 0) {
         pthread_mutex_lock(&mutex);
-        pthread_cond_broadcast(&not_full);
+
+        stop = 1;
+        pthread_cond_broadcast(&not_empty);
+
         pthread_mutex_unlock(&mutex);
 
-        pthread_join(producer_thread, NULL);
+        pthread_join(consumer_thread, NULL);
+
+        log_event("Error creating producer thread.");
         fclose(log_file);
         return;
     }
 
-    /* Wait for both threads to finish */
+    /* Wait for both threads */
     pthread_join(producer_thread, NULL);
     pthread_join(consumer_thread, NULL);
 
-    printf("\nProducer and Consumer completed successfully.\n");
+    log_event("Producer and Consumer completed successfully.");
 
     fclose(log_file);
-
     printf("Log saved in logs/system.log\n");
     printf("=======================================\n");
 }
