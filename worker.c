@@ -1,18 +1,20 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/wait.h>
-
+#include <errno.h>
 #include "worker.h"
 
-/* Run one child process and inspect its exit status */
-static void run_child(const char *name, int simulate_failure)
+#define MAX_WORKERS 10
+
+/* Create one child process and check its exit status */
+static void run_child(int worker_no, int simulate_failure)
 {
     pid_t pid;
     int status;
 
-    printf("\nStarting %s...\n", name);
+    printf("\nStarting Worker %d...\n", worker_no);
+    fflush(NULL);
 
     pid = fork();
 
@@ -23,52 +25,81 @@ static void run_child(const char *name, int simulate_failure)
 
     if (pid == 0) {
         /* Child process */
-        printf("%s: Worker process started. PID = %d\n",
-               name, getpid());
+        printf("Worker %d started. PID = %ld\n",
+               worker_no, (long)getpid());
 
         if (simulate_failure) {
-            printf("%s: Simulating a worker failure.\n", name);
+            printf("Worker %d: Simulating failure.\n", worker_no);
             fflush(stdout);
-            exit(EXIT_FAILURE);
+            _exit(EXIT_FAILURE);
         }
 
-        printf("%s: Task completed successfully.\n", name);
+        printf("Worker %d: Task completed successfully.\n", worker_no);
         fflush(stdout);
-        exit(EXIT_SUCCESS);
+        _exit(EXIT_SUCCESS);
     }
 
     /* Parent process */
-    printf("Parent: Waiting for %s (PID = %d)...\n", name, pid);
+    printf("Parent: Waiting for Worker %d (PID = %ld)...\n",
+           worker_no, (long)pid);
 
-    if (waitpid(pid, &status, 0) == -1) {
+    /* Wait until the child finishes */
+    while (waitpid(pid, &status, 0) == -1) {
+        if (errno == EINTR)
+            continue;
+
         perror("waitpid");
         return;
     }
 
+    /* Check how the child terminated */
     if (WIFEXITED(status)) {
         int exit_code = WEXITSTATUS(status);
 
-        if (exit_code == EXIT_SUCCESS) {
-            printf("Parent: %s completed normally.\n", name);
-        } else {
-            printf("Parent: %s failed with exit code %d.\n",
-                   name, exit_code);
-        }
-    } else if (WIFSIGNALED(status)) {
-        printf("Parent: %s terminated by signal %d.\n",
-               name, WTERMSIG(status));
+        if (exit_code == EXIT_SUCCESS)
+            printf("Parent: Worker %d completed normally.\n", worker_no);
+        else
+            printf("Parent: Worker %d failed with exit code %d.\n",
+                   worker_no, exit_code);
+    }
+    else if (WIFSIGNALED(status)) {
+        printf("Parent: Worker %d terminated by signal %d.\n",
+               worker_no, WTERMSIG(status));
     }
 }
 
 void run_worker_demo(void)
 {
+    int num_workers;
+    char choice;
+
     printf("\n========== WORKER PROCESS MANAGEMENT ==========\n");
 
-    /* Case 1: Normal completion */
-    run_child("Worker 1", 0);
+    printf("Enter number of workers (1-%d): ", MAX_WORKERS);
 
-    /* Case 2: Controlled simulated failure */
-    run_child("Worker 2", 1);
+    if (scanf("%d", &num_workers) != 1 ||
+        num_workers < 1 || num_workers > MAX_WORKERS) {
+        printf("Invalid number of workers.\n");
+        return;
+    }
+
+    for (int i = 1; i <= num_workers; i++) {
+        printf("\nShould Worker %d simulate failure? (y/n): ", i);
+
+        if (scanf(" %c", &choice) != 1) {
+            printf("Invalid input. Stopping worker demonstration.\n");
+            return;
+        }
+
+        if (choice != 'y' && choice != 'Y' &&
+            choice != 'n' && choice != 'N') {
+            printf("Please enter y or n.\n");
+            i--;
+            continue;
+        }
+
+        run_child(i, choice == 'y' || choice == 'Y');
+    }
 
     printf("\nWorker process management demonstration completed.\n");
     printf("================================================\n");
